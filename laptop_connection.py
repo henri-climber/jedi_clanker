@@ -7,6 +7,7 @@ import json, socket, time, signal, os
 from threading import Event
 import numpy as np
 from bbos import Writer, Config, Type
+from jedi_clanker import sfx
 
 CFG = Config("so101")
 UDP_PORT = 5005
@@ -24,6 +25,8 @@ def main():
     sock.settimeout(0.05)
 
     print(f"[bridge] listening udp://0.0.0.0:{UDP_PORT}  dof={CFG.dof}")
+    # Play ignition/startup SFX (non-blocking) if available
+    sfx.play_startup()
 
     with Writer("so101.torque", Type("so101_torque")) as w_torque, \
          Writer("so101.ctrl",   Type("so101_ctrl"))   as w_ctrl:
@@ -31,6 +34,8 @@ def main():
         w_torque["enable"] = np.zeros(CFG.dof, dtype=np.bool_)
         last_ok = time.time()
         torque_on = False
+
+        swing = sfx.SwingSounder()
 
         while not stop.is_set():
             now = time.time()
@@ -56,9 +61,18 @@ def main():
                     # clamp optional limits here if you like
                     w_ctrl["pos"] = np.array(pos, dtype=np.float32)
                     last_ok = now
+                    # Play swing SFX on motion when torque is engaged
+                    if torque_on:
+                        try:
+                            swing.on_motion(pos)
+                        except Exception:
+                            pass
                 elif mtype == "torque":
                     en = bool(msg.get("enable", False))
                     w_torque["enable"] = (np.ones if en else np.zeros)(CFG.dof, dtype=np.bool_)
+                    # If torque transitions OFF->ON, play ignition/startup
+                    if en and not torque_on:
+                        sfx.play_startup()
                     torque_on = en
                     last_ok = now
                 elif mtype == "ping":

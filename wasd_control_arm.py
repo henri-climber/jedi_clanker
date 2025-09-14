@@ -9,6 +9,7 @@
 from bbos import Writer, Config, Type
 import numpy as np
 import sys, select, termios, tty, time, os
+from jedi_clanker import sfx
 
 # ---------------- User settings ----------------
 CFG                = Config("so101")         # arm config (provides dof)
@@ -106,6 +107,8 @@ def main():
                 w_torque[TORQUE_KEY] = np.ones(dof, dtype=np.bool_)
                 torque_on = True
                 print("Torque: ON")
+                # Play ignition/startup SFX if available
+                sfx.play_startup()
             except KeyError as e:
                 raise RuntimeError(
                     f"Torque message missing field '{TORQUE_KEY}'. "
@@ -114,6 +117,7 @@ def main():
 
             period = 1.0 / HZ
             last = time.time()
+            swing = sfx.SwingSounder()
 
             while True:
                 # Keep loop rate
@@ -140,6 +144,8 @@ def main():
                         torque_on = not torque_on
                         w_torque[TORQUE_KEY] = (np.ones if torque_on else np.zeros)(dof, dtype=np.bool_)
                         print("Torque:", "ON" if torque_on else "OFF")
+                        if torque_on:
+                            sfx.play_startup()
                         continue
                     elif lc == 'ä':
                         q_tgt = q_home.copy()
@@ -174,6 +180,8 @@ def main():
                 # ---- send command ----
                 try:
                     w_ctrl[CTRL_POS_KEY] = q_cmd
+                    if torque_on:
+                        swing.on_motion(q_cmd)
                 except KeyError as e:
                     raise RuntimeError(
                         f"Control message missing field '{CTRL_POS_KEY}'. "

@@ -131,6 +131,8 @@ class PhoneIMUController:
             self.robot_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.robot_addr = (robot_ip, 5005)
             print(f"🤖 UDP Robot Mode: {robot_ip}:5005")
+            print(f"🔍 DEBUG: UDP socket created: {self.robot_sock}")
+            print(f"🔍 DEBUG: Target address: {self.robot_addr}")
         except Exception as e:
             print(f"❌ UDP setup failed: {e}")
             self.udp_robot = None
@@ -138,6 +140,7 @@ class PhoneIMUController:
     def send_robot_position(self, joint_angles):
         """Send position command to robot via UDP."""
         if not self.robot_sock or not self.robot_addr:
+            print("⚠️  No UDP socket or address configured")
             return
 
         try:
@@ -148,11 +151,19 @@ class PhoneIMUController:
                 "seq": int(time.time() * 1000)
             }
 
+            # Enhanced debug output
+            print(f"🔍 DEBUG: Sending to {self.robot_addr[0]}:{self.robot_addr[1]}")
+            print(f"🔍 DEBUG: Message: {json.dumps(msg, indent=2)}")
+            print(f"🔍 DEBUG: Joint angles: {[f'{x:.3f}' for x in joint_angles]}")
+            print(f"🔍 DEBUG: Message size: {len(json.dumps(msg).encode('utf-8'))} bytes")
+            
             self.robot_sock.sendto(json.dumps(msg).encode("utf-8"), self.robot_addr)
-            print(f"🤖 Sent joint angles: {[f'{x:.3f}' for x in joint_angles]}")
+            print(f"✅ UDP sent successfully to {self.robot_addr[0]}:{self.robot_addr[1]}")
 
         except Exception as e:
             print(f"❌ UDP send failed: {e}")
+            print(f"🔍 DEBUG: Socket state: {self.robot_sock}")
+            print(f"🔍 DEBUG: Address: {self.robot_addr}")
 
     def log_to_file(self, data):
         """Log data to file if specified."""
@@ -267,51 +278,33 @@ class PhoneIMUController:
 
         return np.array([roll, pitch, yaw])
 
-    def calculate_robot_target_from_phone(self, imu_data):
-        """Convert phone orientation to robot end-effector target pose."""
-
-        # Get phone orientation (degrees to radians)
-        alpha = math.radians(imu_data.get('alpha', 0) or 0)  # Z-axis
-        beta = math.radians(imu_data.get('beta', 0) or 0)  # X-axis
-        gamma = math.radians(imu_data.get('gamma', 0) or 0)  # Y-axis
-
-        # Define workspace center (where robot "neutral" position is)
-        center = np.array([0.35, 0.0, 0.25])
-
-        # Map phone tilt to position offset in robot workspace
-        workspace_size = 0.15  # 15cm movement range
-
-        position_target = center + np.array([
-            beta * workspace_size / math.pi,  # Forward/back from phone pitch
-            -gamma * workspace_size / math.pi,  # Left/right from phone roll
-            alpha * workspace_size / (2 * math.pi)  # Up/down from phone yaw
-        ])
-
-        # Clamp to safe workspace
-        position_target = np.clip(position_target,
-                                  [0.2, -0.2, 0.1],  # Workspace limits
-                                  [0.5, 0.2, 0.4])
-
-        return position_target
-
     def calculate_inverse_kinematics(self):
-        """Use IK properly with direct phone-to-target mapping."""
+        """Calculate joint angles using inverse kinematics."""
         if not self.use_ik or not self.robot_chain:
             return self.fallback_joint_mapping()
 
-        # Get target position directly from current phone orientation
-        target_position = self.calculate_robot_target_from_phone(self.last_imu_data)
-
         try:
-            joint_angles = self.robot_chain.inverse_kinematics(target_position.tolist())
+            # Use position for IK
+            target_position = self.hand_position.tolist()
 
+            # Calculate inverse kinematics
+            joint_angles = self.robot_chain.inverse_kinematics(target_position)
+
+            # Remove fixed joints (first and last in IKPy are usually fixed)
             if len(joint_angles) > 6:
                 joint_angles = joint_angles[1:-1]
 
-            return joint_angles[:6]
+            # Ensure we have exactly 6 joints for SO-101
+            if len(joint_angles) >= 6:
+                return joint_angles[:6]
+            else:
+                # Pad with zeros if needed
+                result = np.zeros(6)
+                result[:len(joint_angles)] = joint_angles
+                return result
 
         except Exception as e:
-            print(f"IK failed: {e}")
+            print(f"❌ IK calculation failed: {e}")
             return self.fallback_joint_mapping()
 
     def fallback_joint_mapping(self):
@@ -627,6 +620,9 @@ def main():
     parser.add_argument("--output-file", help="Log data to file")
     parser.add_argument("--host", default="localhost", help="Web server host")
     parser.add_argument("--port", type=int, default=8000, help="Web server port")
+    parser.add_argument("--https", action="store_true", help="Enable HTTPS")
+    parser.add_argument("--ssl-key", default="ssl_certs/server.key", help="SSL private key file")
+    parser.add_argument("--ssl-cert", default="ssl_certs/server.crt", help="SSL certificate file")
 
     args = parser.parse_args()
 
@@ -644,28 +640,36 @@ def main():
     # Create web app
     app = create_app(controller)
 
-    print(f"🌐 Starting web server on http://{args.host}:{args.port}")
-    print(f"📱 Open this URL on your phone: http://{args.host}:{args.port}")
+    # Determine protocol
+    protocol = "https" if args.https else "http"
 
-    if controller.use_ik:
-        print("🧠 Using Inverse Kinematics mode")
+    print(f"🌐 Starting web server on {protocol}://{args.host}:{args.port}")
+    print(f"📱 Open this URL on your phone: {protocol}://{args.host}:{args.port}")
+
+    if args.https:
+        print("🔒 HTTPS enabled - DeviceMotionEvent should work on Android")
     else:
-        print("⚙️ Using Direct Joint Mapping mode")
-
-    print("\n📋 Instructions:")
-    print("1. Open the URL on your phone")
-    print("2. Click 'Connect IMU' and grant permissions")
-    print("3. Click 'Start Control' to begin robot control")
-    print("4. Move your phone to control the robot")
-    print("=" * 50)
+        print("⚠️  HTTP mode - DeviceMotionEvent may not work on Android")
 
     try:
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level="warning"  # Reduce log noise
-        )
+        if args.https:
+            # HTTPS mode
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                ssl_keyfile=args.ssl_key,
+                ssl_certfile=args.ssl_cert,
+                log_level="warning"
+            )
+        else:
+            # HTTP mode
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level="warning"
+            )
     except KeyboardInterrupt:
         print("\n👋 Shutting down...")
     finally:

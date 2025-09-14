@@ -86,9 +86,15 @@ class SO101IKSolver:
                 try:
                     self.model = mujoco.MjModel.from_xml_path(self.urdf_path)
                     print(f"✅ Loaded URDF directly: {self.urdf_path}")
-                except:
-                    print(f"❌ Could not load {self.urdf_path}. Convert to MuJoCo XML format.")
-                    return
+                except Exception as e:
+                    if "No such file" in str(e) and ".stl" in str(e):
+                        print("⚠️ Missing mesh files - creating mesh-free version...")
+                        clean_urdf = self.strip_meshes_from_urdf()
+                        self.model = mujoco.MjModel.from_xml_string(clean_urdf)
+                        print(f"✅ Loaded mesh-free URDF")
+                    else:
+                        print(f"❌ Could not load {self.urdf_path}: {e}")
+                        return
 
             self.data = mujoco.MjData(self.model)
             self.model.body_gravcomp[:] = 1.0  # Enable gravity compensation
@@ -108,6 +114,26 @@ class SO101IKSolver:
         except Exception as e:
             print(f"❌ MuJoCo setup failed: {e}")
             print("Falling back to ikpy...")
+
+    def strip_meshes_from_urdf(self):
+        """Remove mesh references from URDF and replace with simple shapes."""
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(self.urdf_path)
+        root = tree.getroot()
+
+        # Find all mesh elements and replace with cylinders
+        for mesh in root.findall('.//mesh'):
+            parent = mesh.getparent()
+            if parent is not None:
+                # Replace mesh with simple cylinder
+                parent.remove(mesh)
+                cylinder = ET.SubElement(parent, 'cylinder')
+                cylinder.set('radius', '0.05')
+                cylinder.set('length', '0.1')
+
+        # Return as string
+        return ET.tostring(root, encoding='unicode')
 
     def setup_end_effector(self):
         """Find and setup end-effector reference."""

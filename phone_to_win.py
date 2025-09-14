@@ -267,33 +267,51 @@ class PhoneIMUController:
 
         return np.array([roll, pitch, yaw])
 
+    def calculate_robot_target_from_phone(self, imu_data):
+        """Convert phone orientation to robot end-effector target pose."""
+
+        # Get phone orientation (degrees to radians)
+        alpha = math.radians(imu_data.get('alpha', 0) or 0)  # Z-axis
+        beta = math.radians(imu_data.get('beta', 0) or 0)  # X-axis
+        gamma = math.radians(imu_data.get('gamma', 0) or 0)  # Y-axis
+
+        # Define workspace center (where robot "neutral" position is)
+        center = np.array([0.35, 0.0, 0.25])
+
+        # Map phone tilt to position offset in robot workspace
+        workspace_size = 0.15  # 15cm movement range
+
+        position_target = center + np.array([
+            beta * workspace_size / math.pi,  # Forward/back from phone pitch
+            -gamma * workspace_size / math.pi,  # Left/right from phone roll
+            alpha * workspace_size / (2 * math.pi)  # Up/down from phone yaw
+        ])
+
+        # Clamp to safe workspace
+        position_target = np.clip(position_target,
+                                  [0.2, -0.2, 0.1],  # Workspace limits
+                                  [0.5, 0.2, 0.4])
+
+        return position_target
+
     def calculate_inverse_kinematics(self):
-        """Calculate joint angles using inverse kinematics."""
+        """Use IK properly with direct phone-to-target mapping."""
         if not self.use_ik or not self.robot_chain:
             return self.fallback_joint_mapping()
 
+        # Get target position directly from current phone orientation
+        target_position = self.calculate_robot_target_from_phone(self.last_imu_data)
+
         try:
-            # Use position for IK
-            target_position = self.hand_position.tolist()
+            joint_angles = self.robot_chain.inverse_kinematics(target_position.tolist())
 
-            # Calculate inverse kinematics
-            joint_angles = self.robot_chain.inverse_kinematics(target_position)
-
-            # Remove fixed joints (first and last in IKPy are usually fixed)
             if len(joint_angles) > 6:
                 joint_angles = joint_angles[1:-1]
 
-            # Ensure we have exactly 6 joints for SO-101
-            if len(joint_angles) >= 6:
-                return joint_angles[:6]
-            else:
-                # Pad with zeros if needed
-                result = np.zeros(6)
-                result[:len(joint_angles)] = joint_angles
-                return result
+            return joint_angles[:6]
 
         except Exception as e:
-            print(f"❌ IK calculation failed: {e}")
+            print(f"IK failed: {e}")
             return self.fallback_joint_mapping()
 
     def fallback_joint_mapping(self):

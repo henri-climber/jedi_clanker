@@ -10,20 +10,13 @@ import time
 import math
 import subprocess
 import argparse
-import os
+import matplotlib.pyplot as plt
+from pyjoycon import JoyCon, get_R_id
 
-# Add these imports to your existing script
-try:
-    from pyjoycon import JoyCon, get_R_id, get_L_id
-except ImportError as e:
-    print(f"❌ Error importing pyjoycon: {e}")
-    print("Make sure you installed it with: pip install joycon-python hidapi pyglm")
-    sys.exit(1)
 
 class JoyConSSHController:
     def __init__(self, ssh_host=None, ssh_user=None, output_file=None, output_mode="console"):
         """Initialize with SSH or file output capabilities."""
-        self.left_joycon = None
         self.right_joycon = None
         self.running = True
         
@@ -190,6 +183,111 @@ class JoyConSSHController:
         except Exception as e:
             print(f"❌ File write failed: {e}")
 
+    def _get_stick_position(self, joycon):
+        """Get stick position from the JoyCon object using get_stick_right_horizontal/vertical methods."""
+        try:
+            stick_x = joycon.get_stick_right_horizontal()
+            stick_y = joycon.get_stick_right_vertical()
+            # These methods may return None if the stick is not moved; default to 0
+            stick_x = stick_x if stick_x is not None else 0
+            stick_y = stick_y if stick_y is not None else 0
+            return {"horizontal": stick_x, "vertical": stick_y}
+        except Exception as e:
+            print(f"[DEBUG] Could not get stick data using get_stick_right_horizontal/vertical: {e}")
+            print("[DEBUG] JoyCon attributes:")
+            print(dir(joycon))
+            print("[DEBUG] JoyCon __dict__:")
+            print(getattr(joycon, '__dict__', {}))
+            raise AttributeError("Could not get stick data from JoyCon object. See debug output above.")
+
+    def visualize_joycon(self):
+        """Visualize Right Joy-Con stick and accelerometer (orientation) data in real time. Show gyro as text only."""
+        if not self.right_joycon:
+            print("❌ No Right Joy-Con connected for visualization. Please pair it via Bluetooth and try again.")
+            return
+        joycon = self.right_joycon
+        print("\n🕹️  Right Joy-Con Visualization Mode")
+        print("- Move the stick and the Joy-Con to see real-time data.")
+        print("- Close the window or press Ctrl+C to exit.\n")
+        plt.ion()
+        fig = plt.figure(figsize=(12, 6))
+        ax_stick = fig.add_subplot(1, 2, 1)
+        ax_3d = fig.add_subplot(1, 2, 2, projection='3d')
+        stick_scatter = ax_stick.scatter([], [], c='b')
+        ax_stick.set_xlim(-1, 1)
+        ax_stick.set_ylim(-1, 1)
+        ax_stick.set_title('Stick Position')
+        ax_stick.set_xlabel('X')
+        ax_stick.set_ylabel('Y')
+        ax_stick.grid(True)
+        quiver_accel = None
+        ax_3d.set_xlim(-5, 5)
+        ax_3d.set_ylim(-5, 5)
+        ax_3d.set_zlim(-5, 5)
+        ax_3d.set_title('Accel (green, gravity direction)')
+        ax_3d.set_xlabel('X')
+        ax_3d.set_ylabel('Y')
+        ax_3d.set_zlabel('Z')
+        legend = ax_3d.legend(['Accel'], loc='upper left')
+        text_box = fig.text(0.05, 0.92, '', fontsize=10, va='top', family='monospace')
+        gyro_text = fig.text(0.55, 0.92, '', fontsize=10, va='top', family='monospace', color='red')
+        while True:
+            try:
+                stick = self._get_stick_position(joycon)
+                stick_x = stick.get("horizontal", 0) / 32767.0
+                stick_y = stick.get("vertical", 0) / 32767.0
+                accel = (
+                    joycon.get_accel_x(),
+                    joycon.get_accel_y(),
+                    joycon.get_accel_z()
+                )
+                gyro = (
+                    joycon.get_gyro_x(),
+                    joycon.get_gyro_y(),
+                    joycon.get_gyro_z()
+                )
+                stick_scatter.remove()
+                stick_scatter = ax_stick.scatter([stick_x], [stick_y], c='b')
+                ax_, ay, az = accel[0], accel[1], accel[2]
+                if quiver_accel:
+                    quiver_accel.remove()
+                quiver_accel = ax_3d.quiver(0, 0, 0, ax_, ay, az, length=1, color='g', label='Accel')
+                text_box.set_text(
+                    f"Stick: x={stick_x:.2f}, y={stick_y:.2f}\n"
+                    f"Accel (gravity): x={ax_:.2f}, y={ay:.2f}, z={az:.2f}"
+                )
+                gx, gy, gz = gyro[0], gyro[1], gyro[2]
+                gyro_text.set_text(
+                    f"Gyro (angular velocity):\n x={gx:.2f}, y={gy:.2f}, z={gz:.2f}"
+                )
+                plt.pause(0.01)
+            except KeyboardInterrupt:
+                print("\n👋 Visualization stopped by user.")
+                break
+            except Exception as e:
+                print(f"Visualization error: {e}")
+                break
+        plt.ioff()
+        plt.show()
+
+    def connect_joycons(self):
+        """Connect to the right Joy-Con only."""
+        try:
+            right_id = get_R_id()
+            if right_id:
+                self.right_joycon = JoyCon(*right_id)
+                print("✅ Connected to Right Joy-Con")
+            else:
+                print("❌ Right Joy-Con not found. Please pair it via Bluetooth and try again.")
+                self.right_joycon = None
+        except Exception as e:
+            print(f"❌ Error connecting to Right Joy-Con: {e}")
+            self.right_joycon = None
+
+    def run(self):
+        print("No run() implementation yet. Exiting.")
+        return
+
 def main():
     """Main function with command line arguments."""
     parser = argparse.ArgumentParser(description="Joy-Con Robot Controller with SSH Output")
@@ -198,7 +296,8 @@ def main():
     parser.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22)")
     parser.add_argument("--output-file", help="Output commands to file")
     parser.add_argument("--mode", choices=["console", "ssh", "file"], default="console", help="Output mode")
-    
+    parser.add_argument("--visualize", action="store_true", help="Visualize Joy-Con position and angles")
+
     args = parser.parse_args()
     
     # Determine output mode
@@ -217,6 +316,16 @@ def main():
     print("🤖 Joy-Con SSH Robot Controller")
     print("=" * 50)
     
+    if args.visualize:
+        controller = JoyConSSHController(
+            ssh_host=args.ssh_host,
+            ssh_user=args.ssh_user,
+            output_file=args.output_file,
+            output_mode=output_mode
+        )
+        controller.visualize_joycon()
+        return
+
     controller = JoyConSSHController(
         ssh_host=args.ssh_host,
         ssh_user=args.ssh_user,

@@ -11,8 +11,6 @@ import math
 import argparse
 import json
 import socket
-import os
-import glob
 import numpy as np
 import asyncio
 from pathlib import Path
@@ -38,17 +36,6 @@ try:
 except ImportError:
     print("Warning: AHRS library not found. Install with: pip install ahrs")
     HAS_AHRS = False
-
-# Sound effects utility
-try:
-    # Prefer absolute import when run from repo root
-    from jedi_clanker import sfx as sfx
-except Exception:
-    try:
-        # Fallback to local import when running from this directory
-        import sfx as sfx
-    except Exception:
-        sfx = None
 
 
 class PosAccum:
@@ -373,14 +360,7 @@ def create_app(ctrl):
 
     @app.get("/", response_class=HTMLResponse)
     async def root():
-        # Build sound buttons for all discovered .wav files
-        sounds = _list_sounds()
-        sound_buttons_html = "\n".join(
-            f'<button class="button sound-btn" data-sound="{os.path.basename(name)}">🔊 {os.path.basename(name)}</button>'
-            for name in sounds
-        ) or '<div style="color:#777;">No .wav files found in audio/</div>'
-
-        html = """
+        return HTMLResponse("""
 <!doctype html>
 <html>
 <head>
@@ -437,8 +417,6 @@ def create_app(ctrl):
             margin: 20px 0;
         }
         .active { background: #28a745 !important; }
-        .sound-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
-        .sound-btn { font-size: 14px; padding: 10px; }
     </style>
 </head>
 <body>
@@ -453,12 +431,6 @@ def create_app(ctrl):
         </div>
 
         <div id="data" class="data">Waiting for IMU data...</div>
-
-        <div class="data">
-            <div style="font-weight: bold; margin-bottom: 8px;">🔊 Sounds</div>
-            <div id="soundGrid" class="sound-grid">%(sound_buttons)s</div>
-            <div style="margin-top:8px; font-size:12px; color:#555;">Buttons play on the server host.</div>
-        </div>
     </div>
 
     <script>
@@ -471,7 +443,6 @@ def create_app(ctrl):
         const connectBtn = document.getElementById('connectBtn');
         const controlBtn = document.getElementById('controlBtn');
         const calibrateBtn = document.getElementById('calibrateBtn');
-        const soundGrid = document.getElementById('soundGrid');
 
         function updateStatus(message, isConnected) {
             statusDiv.textContent = message;
@@ -544,19 +515,6 @@ Control: ${isControlling ? 'ACTIVE' : 'inactive'}
                 console.error('WebSocket error:', error);
                 updateStatus('❌ Connection error', false);
             };
-
-            ws.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.play_ack) {
-                        updateStatus(`🔊 Played: ${msg.sound}`, true);
-                    } else if (msg.play_err) {
-                        updateStatus(`❌ Sound error: ${msg.error || 'unknown'}`, false);
-                    }
-                } catch (e) {
-                    // ignore non-JSON messages
-                }
-            };
         }
 
         function sendData() {
@@ -616,29 +574,12 @@ Control: ${isControlling ? 'ACTIVE' : 'inactive'}
             }
         });
 
-        // Play any sound by tapping its button
-        if (soundGrid) {
-            soundGrid.addEventListener('click', (e) => {
-                const btn = e.target.closest('.sound-btn');
-                if (!btn) return;
-                const name = btn.getAttribute('data-sound');
-                if (!name) return;
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    updateStatus('❌ Connect IMU first', false);
-                    return;
-                }
-                ws.send(JSON.stringify({ play_sound: name }));
-                updateStatus(`▶️ Play requested: ${name}`, true);
-            });
-        }
-
         // Initial data display
         updateData();
     </script>
 </body>
 </html>
-        """ % {"sound_buttons": sound_buttons_html})
-        return HTMLResponse(html)
+        """)
 
     @app.websocket("/ws")
     async def imu_websocket(websocket: WebSocket):
@@ -660,35 +601,6 @@ Control: ${isControlling ? 'ACTIVE' : 'inactive'}
                     print(f"🎮 Control {'activated' if ctrl.control_active else 'deactivated'}")
                     continue
 
-                # Sound playback request
-                if 'play_sound' in payload:
-                    name = str(payload.get('play_sound') or '').strip()
-                    if not name:
-                        try:
-                            await websocket.send_text(json.dumps({"play_err": True, "error": "empty name"}))
-                        except Exception:
-                            pass
-                        continue
-                    ok = False
-                    err = None
-                    if sfx is None:
-                        err = "sfx module unavailable"
-                    else:
-                        try:
-                            ok = sfx.play_wav(name)
-                            if not ok:
-                                err = "player missing or file not found"
-                        except Exception as e:
-                            err = str(e)
-                    try:
-                        if ok:
-                            await websocket.send_text(json.dumps({"play_ack": True, "sound": name}))
-                        else:
-                            await websocket.send_text(json.dumps({"play_err": True, "sound": name, "error": err}))
-                    except Exception:
-                        pass
-                    continue
-
                 # Process IMU data
                 if all(k in payload for k in ['alpha', 'beta', 'gamma']):
                     ctrl.process_imu_data(payload)
@@ -699,30 +611,6 @@ Control: ${isControlling ? 'ACTIVE' : 'inactive'}
             ctrl.control_active = False
 
     return app
-
-def _list_sounds() -> list:
-    """Return a sorted list of available sound basenames from known audio dirs."""
-    files = []
-    seen = set()
-    # Prefer sfx AUDIO_DIRS if available; else default to ./audio
-    dirs = []
-    if sfx and getattr(sfx, 'AUDIO_DIRS', None):
-        dirs.extend([d for d in sfx.AUDIO_DIRS if d and os.path.isdir(d)])
-    # Always consider local audio folder next to this file
-    here = os.path.dirname(__file__)
-    local_audio = os.path.join(here, 'audio')
-    if os.path.isdir(local_audio):
-        dirs.append(local_audio)
-    # Scan for common audio extensions (wav primary)
-    exts = ("*.wav", "*.WAV")
-    for d in dirs:
-        for pat in exts:
-            for f in glob.glob(os.path.join(d, pat)):
-                base = os.path.basename(f)
-                if base not in seen:
-                    files.append(base)
-                    seen.add(base)
-    return sorted(files)
 
 
 def main():
